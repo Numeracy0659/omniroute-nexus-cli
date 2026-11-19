@@ -3,7 +3,7 @@
 # tag: the floating tag let v3.8.52 ship with node 26.12.0, whose bundled root store still
 # trusts the compromised eMudhra intermediates (https://emudhra.we-have-a-problem.com/).
 # 26.12.1 is the first 26.x that rejects them; tests/unit/build/docker-ca-baseline.test.mjs
-# keeps it from going below that.
+# prevents downgrades below that version.
 FROM node:26.12.1-trixie-slim AS base
 WORKDIR /app
 
@@ -22,7 +22,7 @@ WORKDIR /app
 # NODE_DIST_URL, when set, is exported as NODEJS_ORG_MIRROR only for the
 # node-gyp rebuild in the builder stage (lib/process-release.js). Left empty,
 # the variable is never set and node-gyp uses nodejs.org. The npm config write
-# persists in ~/.npmrc for every stage derived from base.
+# persists in ~/.npmrc throughout every descendant stage.
 ARG APT_MIRROR=http://deb.debian.org
 ARG NPM_REGISTRY=
 ARG NODE_DIST_URL=
@@ -32,7 +32,7 @@ ARG NODE_DIST_URL=
 # (perl / util-linux / systemd / ncurses / zlib / tar / sqlite / shadow / pam …)
 # that already have a fix published in trixie. CVEs without an upstream fix yet
 # (local-only TOCTOU, etc.) remain until the distro patches them and the image
-# is rebuilt; none are reachable from the proxy's request surface at runtime.
+# is rebuilt; the proxy's request surface cannot reach them.
 RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-lists,target=/var/lib/apt/lists,sharing=locked \
   sed -i -E "s|https?://deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
@@ -57,7 +57,7 @@ RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,targe
 # alone was pure build time for zero CVEs — it is kept only to land on a known,
 # current npm tree, and the patched copies are overlaid on top below.
 #
-# Deleting npm from the runner stages is NOT an option: the application shells
+# Runner stages must retain npm: the application shells
 # out to npm at runtime (src/lib/services/installers/utils.ts::runNpm for the
 # embedded services, src/lib/system/{autoUpdate,globalPackagePath}.ts,
 # src/app/api/system/version). The previous version of this comment claimed the
@@ -126,10 +126,10 @@ RUN test -f package-lock.json \
 # `--ignore-scripts` on the parent `npm ci` it depends on npm's script-allowlist
 # machinery correctly re-enabling that one package's script. Some self-hosted build
 # environments (e.g. Dokploy) hit a broken/incomplete better-sqlite3 native binding
-# from that indirection. Invoking `node-gyp rebuild` directly inside the package
+# with that indirection. Invoking `node-gyp rebuild` directly inside the package
 # directory bypasses npm's script-running layer entirely and is deterministic
 # regardless of npm version or ignore-scripts allowlist behavior.
-# node-gyp comes from npm's own bundled copy (deterministic, already in the image)
+# node-gyp uses npm's own bundled copy (deterministic, already in the image)
 # instead of `npx --yes`, which would install an arbitrary registry version
 # on-demand and run its lifecycle scripts (Sonar docker:S6505).
 RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-npm-cache,target=/root/.npm \
@@ -142,9 +142,9 @@ RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-npm-cache,targe
   && node -e "const wreq=require('wreq-js'); if(typeof wreq.createTransport!=='function') process.exit(1)"
 
 # Bundler for the image build. The DOCKERFILE default is webpack
-# (OMNIROUTE_USE_TURBOPACK=0), deliberately different from the repo's code
-# default for local dev and non-Docker builds (Turbopack, =1 — read by
-# scripts/dev/run-next.mjs and scripts/build/build-next-isolated.mjs). A bare
+# (OMNIROUTE_USE_TURBOPACK=0); local dev and non-Docker builds default to
+# Turbopack (=1), as set by scripts/dev/run-next.mjs and
+# scripts/build/build-next-isolated.mjs). A bare
 # `docker build .` with no build args is what one-click hosts (Railway and
 # similar) and ad-hoc self-hosters run, usually on memory-capped builders, and
 # Turbopack is the bundler that gets OOM-killed silently there (see the ARG+ENV
@@ -155,7 +155,7 @@ RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-npm-cache,targe
 # to a root" in ImportTracer::get_traces) no longer reproduces on Next 16.2.9 —
 # validated 2026-07-05 with clean amd64 (12min14s, image smoke-tested:
 # /api/monitoring/health 200) and arm64 (qemu, exit 0, zero panic strings)
-# builds, and Turbopack cut the bare build from 17min to 9min on the same
+# builds, and Turbopack cut the bare build to 9min (previously 17min) on the same
 # 32-core box. See docs/ops/QUALITY_GATE_PLAYBOOK.md Parte 6.
 #
 # Declared as ARG+ENV, not a bare ENV: a bare ENV shadows any same-named ARG for
@@ -219,7 +219,7 @@ ENV NODE_OPTIONS="--max-old-space-size=${OMNIROUTE_BUILD_MEMORY_MB}"
 # build right after "Collecting page data using N workers".
 #
 # #11419's first fix (8 → 3) modeled the per-worker peak as an INFERENCE
-# (2560 MB, guessed from "7 workers didn't fit") and assumed the parent
+# (2560 MB; extrapolation based on "7 workers didn't fit") and assumed the parent
 # process's RSS tracked the V8 heap ceiling. Both assumptions were wrong: a
 # live VPS reproduction (issue #7518, dmesg OOM-killer report) measured the
 # real per-process RSS directly at ~4.5 GB, independent of the NODE_OPTIONS
@@ -247,7 +247,7 @@ COPY . ./
 RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-next-cache,target=/app/.build/next/cache \
   mkdir -p /app/data \
   && npm run build \
-  && node --input-type=module -e "import { createRequire } from 'node:module'; import { pathToFileURL } from 'node:url'; const standaloneRoot = '/app/.build/next/standalone/node_modules/'; const require = createRequire('/app/.build/next/standalone/package.json'); for (const pkg of ['@atjsh/llmlingua-2', '@huggingface/transformers', 'js-tiktoken']) { const resolved = require.resolve(pkg); if (!resolved.startsWith(standaloneRoot)) throw new Error(pkg + ' resolved outside standalone: ' + resolved); await import(pathToFileURL(resolved).href); } const onnxRuntime = require.resolve('onnxruntime-node'); if (!onnxRuntime.startsWith(standaloneRoot)) throw new Error('onnxruntime-node resolved outside standalone: ' + onnxRuntime); await import(pathToFileURL(onnxRuntime).href);"
+  && node --input-type=module -e "const { createRequire } = await import('node:module'); const { pathToFileURL } = await import('node:url'); const standaloneRoot = '/app/.build/next/standalone/node_modules/'; const require = createRequire('/app/.build/next/standalone/package.json'); for (const pkg of ['@atjsh/llmlingua-2', '@huggingface/transformers', 'js-tiktoken']) { const resolved = require.resolve(pkg); if (!resolved.startsWith(standaloneRoot)) throw new Error(pkg + ' resolved outside standalone: ' + resolved); await import(pathToFileURL(resolved).href); } const onnxRuntime = require.resolve('onnxruntime-node'); if (!onnxRuntime.startsWith(standaloneRoot)) throw new Error('onnxruntime-node resolved outside standalone: ' + onnxRuntime); await import(pathToFileURL(onnxRuntime).href);"
 
 # ── Runner base ────────────────────────────────────────────────────────────
 FROM base AS runner-base
@@ -289,7 +289,7 @@ ENV REQUIRE_API_KEY=true
 # `npm run build` (build-next-isolated → assembleStandalone) bundles ALL runtime
 # files into .build/next/standalone/ — .next, node_modules, migrations, scripts,
 # docs, and the previously hand-COPY'd modules below (@swc/helpers, pino-*, split2,
-# migrations). assembleStandalone copies them straight from the builder's
+# migrations). assembleStandalone copies them straight out of the builder's
 # node_modules, so they are present regardless of NFT/Turbopack trace behaviour.
 # The old per-module overrides were therefore pure duplication and were removed
 # (build-output-isolation cleanup). See scripts/build/assembleStandalone.mjs
@@ -351,10 +351,10 @@ FROM runner-base AS runner-web
 
 USER root
 
-# Copy playwright and playwright-core from the builder stage.
+# Copy playwright and playwright-core out of the builder stage.
 # The slim runtime image does not have playwright in node_modules, so npx falls
 # back to a registry download — unreliable on CI runners (exits 127 on failure).
-# Copying from the builder avoids any network access at image-build time and also
+# Copying the builder's versions avoids any network access at image-build time and also
 # ensures the same playwright version is available at runtime for web-session providers.
 COPY --from=builder /app/node_modules/playwright-core ./node_modules/playwright-core
 COPY --from=builder /app/node_modules/playwright ./node_modules/playwright
@@ -385,7 +385,7 @@ FROM runner-base AS runner-cli-core
 # that cannot reach a daemon. The published runner-cli target below keeps its
 # historical Docker client + Compose behavior. Drop back to root briefly so we can
 # install system + global npm packages, then return to the `node` non-root user
-# before the CMD inherited from runner-base runs.
+# before runner-base's inherited CMD runs.
 USER root
 
 # The CLI image can use the internal ChatGPT Web (Codex) Chromium sidecar over
@@ -401,7 +401,7 @@ RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,targe
   && rm -rf /var/lib/apt/lists/* \
   && git config --system url."https://github.com/".insteadOf "ssh://git@github.com/"
 
-# Install CLI tools globally. Separate layer from apt for better cache reuse.
+# Install CLI tools globally. Keep this layer separate; apt has its own layer.
 # Pinned to exact versions per Diego's diagnosis in #12576 — floating
 # `@latest` causes two CI failures:
 #   1. `openclaw` ships a breaking major ~weekly; overnight builds silently
